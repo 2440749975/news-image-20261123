@@ -1,5 +1,6 @@
 import argparse
 from functools import cache
+from math import ceil
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -11,188 +12,296 @@ PAPER = '#faf6ea'
 INK = '#162322'
 GREEN = '#11473e'
 MINT = '#b5ddc3'
-HAIRLINE = '#a9aaa0'
-FONT_DIR = Path('/usr/share/fonts/truetype/dejavu')
+LIME = '#e0e991'
+HAIRLINE = '#acb4a8'
+FONTS = Path('/usr/share/fonts/truetype')
+MAST = 'dejavu/DejaVuSerif-Bold'
+LABEL = 'dejavu/DejaVuSans-Bold'
+TITLE = 'liberation/LiberationSerif-Bold'
+BODY = 'liberation/LiberationSans-Regular'
+TAPE = 'liberation/LiberationSans-Bold'
+
+LEAD = (
+    'NVIDIA COMEBACK', 'Huang Is Back: Nvidia Soars 31% in Biggest Jump in 23 Years',
+    "Nvidia's board reinstated co-founder Jensen Huang as CEO on Monday, just 11 days after he "
+    'stepped down. Shares surged 31.48% to $165.05, adding about $1 trillion in market value in a single session.')
+STORIES = (
+    ('WALL STREET', 'Best Day Since April 2025 Snaps 7-Day Slide',
+     'The S&P 500 jumped 4.73% to 7,237 and the Nasdaq Composite leapt 6.51% to 24,090, '
+     'while the Dow gained 3.01% in a relief rally across AI and chip stocks.'),
+    ('CHIP CRACKDOWN', 'US Blacklists Megaspeed Over Nvidia Smuggling Plot',
+     'Washington put Singapore-based Megaspeed International and six other Southeast Asian firms '
+     'on its Entity List, at the centre of an alleged scheme to divert advanced Nvidia chips.'),
+    ('UKRAINE', 'Zelensky Urges Four-Way Talks With Russia, US, Europe',
+     "Ukraine's president called for a meeting with Russia, the United States and European leaders "
+     'as soon as possible, saying Kyiv is ready to meet as early as Tuesday.'),
+    ('SANCTIONS', 'EU Proposes 22nd Sanctions Package on Russia',
+     "The European Commission's new package targets banks and crypto platforms, and would bar "
+     'Russian teams and athletes from competing under the Russian flag at EU events.'),
+    ('CLIMATE', "'Worst COP Ever': Blame Game After Antalya Failure",
+     'Pacific leaders accused big emitters of betrayal after COP31 in Türkiye collapsed without '
+     'a deal, leaving small island states vowing to press ahead on their own.'),
+    ('AIR DEFENSE', "Russian Jets Enter South Korea's Air Defense Zone",
+     'Seoul said several Russian aircraft flew through its air defense identification zone over '
+     'waters between Korea and Japan on Tuesday, without violating its airspace.'))
+ALLIES = (
+    'ALLIES', 'Pentagon Rebukes Canada Over Defence Spending and F-35 Review',
+    'The Pentagon accused Ottawa of falling short as a partner in defending North America, '
+    "citing defence shortfalls and Canada's rethink of US-made F-35 jets.")
+TICKER = ('NVDA $165.05 +31.48%  |  S&P 500 7,237 +4.73%  |  NASDAQ 24,090 +6.51%  |  '
+          'GOLD $3,656 +3.99%  |  OIL $79.98 -4.76%  |  BITCOIN $60,669 -0.81%')
 
 
 def coords(values):
     return tuple(round(value * SCALE) for value in values)
 
 
+@cache
+def font(face, size):
+    return ImageFont.truetype(str(FONTS / f'{face}.ttf'), round(size * SCALE))
+
+
 class Plate:
-    def __init__(self, image):
-        self.image = image
-        self.draw = ImageDraw.Draw(image)
+    def __init__(self):
+        self.image = Image.new('RGB', coords((SIZE, SIZE)), PAPER)
+        self.draw = ImageDraw.Draw(self.image)
+        self.proof = []
 
-    def line(self, points, fill, width=1):
-        self.draw.line([coords(point) for point in points], fill, round(width * SCALE), joint='curve')
-
-    def rect(self, box, fill):
-        self.draw.rectangle(coords(box), fill)
-
-    def oval(self, box, fill=None, outline=None, width=1):
-        self.draw.ellipse(coords(box), fill, outline, round(width * SCALE))
+    def line(self, points, fill, weight=1):
+        self.draw.line([coords(point) for point in points], fill, max(1, round(weight * SCALE)), joint='curve')
 
     def shape(self, points, fill):
         self.draw.polygon([coords(point) for point in points], fill)
 
-    def text(self, position, words, face, size, fill=INK, anchor='ls'):
-        self.draw.text(coords(position), words, font=font(face, size), fill=fill, anchor=anchor)
+    def rect(self, box, fill):
+        self.draw.rectangle(coords(box), fill)
+
+    def oval(self, box, fill=None, outline=None, weight=1):
+        self.draw.ellipse(coords(box), fill, outline, max(1, round(weight * SCALE)))
+
+    @cache
+    def metrics(self, words, face):
+        left, top, right, bottom = self.draw.textbbox((0, 0), words, font=face, anchor='ls')
+        end = max(right, ceil(self.draw.textlength(words, font=face)))
+        return min(0, left), top, end, bottom
+
+    def width(self, words, face):
+        left, _, right, _ = self.metrics(words, face)
+        return right - left
+
+    def wrap(self, text, face, width, break_before):
+        if break_before:
+            before, space, after = text.partition(' ' + break_before)
+            preferred = (before, break_before + after)
+            if space and all(self.width(line, face) <= width for line in preferred):
+                return preferred
+        words = text.split(' ')
+        lines = [words[0]]
+        for word in words[1:]:
+            trial = lines[-1] + ' ' + word
+            if self.width(trial, face) <= width:
+                lines[-1] = trial
+            else:
+                lines.append(word)
+        return lines
+
+    def text(self, name, text, box, family, maximum, *, leading=1.07, mode='wrap', fill=INK,
+             center=False, middle=False, break_before=None):
+        left, top, width, height = coords(box)
+        if min(left, top) < SCALE or max(left + width, top + height) > (SIZE - 1) * SCALE:
+            raise ValueError(f'{name}: box outside page margins')
+        for steps in range(round(maximum * SCALE), 10 * SCALE - 1, -1):
+            face = font(family, steps / SCALE)
+            lines = [text] if mode == 'single' else self.wrap(text, face, width, break_before)
+            metrics = [self.metrics(line, face) for line in lines]
+            stride = round(steps * leading)
+            bounds = [(index * stride + up, index * stride + down)
+                      for index, (_, up, _, down) in enumerate(metrics)]
+            high, low = min(up for up, _ in bounds), max(down for _, down in bounds)
+            if (all(end - start <= width for start, _, end, _ in metrics) and low - high <= height
+                    and all(first[1] < second[0] for first, second in zip(bounds, bounds[1:]))):
+                break
+        else:
+            raise ValueError(f'{name}: no size fits {box}')
+        if ' '.join(lines) != text:
+            raise ValueError(f'{name}: copy changed during wrap')
+        self.proof.append(f'[{name}] height {ceil((low - high) / SCALE)} / {box[3]} px')
+        baseline = top - high + ((height - low + high) // 2 if middle else 0)
+        for index, (line, (start, up, end, down)) in enumerate(zip(lines, metrics)):
+            origin = left - start + ((width - end + start) // 2 if center else 0)
+            base = baseline + index * stride
+            if not (left <= origin + start <= origin + end <= left + width
+                    and top <= base + up <= base + down <= top + height):
+                raise ValueError(f'{name}: line outside box: {line}')
+            self.draw.text((origin, base), line, font=face, fill=fill, anchor='ls')
+            self.proof.append(f'{ceil((end - start) / SCALE):>4} / {box[2]:<4}  {line}')
+        return max(ceil((end - start) / SCALE) for start, _, end, _ in metrics)
 
 
-@cache
-def font(face, size):
-    return ImageFont.truetype(str(FONT_DIR / f'DejaVu{face}.ttf'), size * SCALE)
+def chip(page):
+    copper, shade, edge = '#72a98e', '#082e29', '#43806c'
+
+    def project(across, back, lift):
+        return (890 + across * 1.02 - back * .81, 243 + across * .42 + back * .64 - lift)
+
+    def ring(radius, lift):
+        return [project(across, back, lift) for across, back in
+                ((-radius, -radius), (radius, -radius), (radius, radius), (-radius, radius))]
+
+    def slab(radius, lift, depth, surface, front, side):
+        rim, foot = ring(radius, lift), ring(radius, lift - depth)
+        page.shape([rim[1], rim[2], foot[2], foot[1]], side)
+        page.shape([rim[2], rim[3], foot[3], foot[2]], front)
+        page.shape(rim, surface)
+        page.line([*rim, rim[0]], MINT, 1)
+
+    for row in range(18):
+        for column in range(19):
+            across, back = 785 + column * 12 + (row % 2) * 5, 150 + row * 11
+            page.oval((across, back, across + 1, back + 1), edge)
+    for offset in (-36, -12, 12, 36):
+        for direction in (-1, 1):
+            points = [project(offset, direction * 55, -23), project(offset, direction * 64, -23),
+                      project(offset - 6, direction * 70, -23), project(offset - 6, direction * 78, -23)]
+            page.line(points, copper, 1)
+            across, back = points[-1]
+            page.oval((across - 2, back - 2, across + 2, back + 2), GREEN, copper)
+    slab(55, -18, 5, '#50856e', shade, '#284f45')
+    for offset in range(-43, 44, 7):
+        for direction in (-1, 1):
+            for transpose in (False, True):
+                points = [(offset, direction * reach, lift) for reach, lift in ((43, 8), (50, 6), (50, -8), (54, -11))]
+                page.line([project(back, across, lift) if transpose else project(across, back, lift)
+                           for across, back, lift in points], MINT, 2.3)
+    slab(45, 13, 10, '#8eb49a', '#234c40', '#426b52')
+    for offset in range(-39, 44, 4):
+        page.line([project(offset, 45, 12), project(offset - 2, 45, 5)], copper, 1)
+    slab(34, 18, 5, '#204e40', shade, '#376350')
+    rim = ring(29, 18)
+    page.line([*rim, rim[0]], '#82a88a', .8)
+    for stripe in range(-24, 25, 6):
+        page.line([project(stripe, -25, 18), project(stripe, 25, 18)], edge, .7)
+    arrow = [(831, 231), (854, 199), (871, 210), (900, 169), (889, 162),
+             (927, 155), (931, 193), (919, 184), (876, 240), (859, 225), (843, 245)]
+    page.shape([(across + 4, down + 8) for across, down in arrow], shade)
+    page.shape(arrow, LIME)
+    page.line([(843, 239), (858, 218), (875, 231), (915, 177)], '#79905e', 1.4)
+    for offset in range(0, 12, 3):
+        page.line([(896 + offset, 166), (898 + offset, 163)], '#79905e', .8)
 
 
-def fitted(face, maximum, width, lines):
-    return next(size for size in range(maximum, 0, -1)
-                if all(font(face, size).getlength(line) <= width * SCALE for line in lines))
+def vignette(page, name, left, top, size, color):
+    def point(across, down):
+        return (left + across * size / 32, top + down * size / 32)
 
+    def stroke(points, weight=1.7, tint=color):
+        page.line([point(*position) for position in points], tint, weight * size / 32)
 
-def treaty(page):
-    sheet = Image.new('RGBA', coords((244, 239)))
-    printwork = Plate(sheet)
-    printwork.shape([(10, 7), (204, 7), (235, 38), (235, 231), (10, 231)], PAPER)
-    printwork.shape([(204, 7), (235, 38), (204, 38)], '#92baa6')
-    printwork.rect((27, 23, 65, 28), GREEN)
-    printwork.rect((71, 23, 98, 28), '#92baa6')
-    printwork.oval((47, 35, 197, 185), GREEN)
-    for inset in (20, 49):
-        printwork.oval((47 + inset, 35, 197 - inset, 185), outline='#689780', width=1.6)
-    for top, bottom in ((66, 154), (85, 135)):
-        printwork.oval((47, top, 197, bottom), outline='#689780', width=1.6)
-    printwork.line([(48, 110), (196, 110)], '#689780', 1.6)
-    printwork.line([(122, 36), (122, 184)], '#689780', 1.6)
-    printwork.shape([(51, 89), (61, 69), (75, 54), (86, 52), (91, 60), (85, 68),
-                     (88, 72), (79, 75), (76, 86), (67, 91), (69, 100), (75, 108),
-                     (67, 106), (60, 96)], MINT)
-    printwork.shape([(72, 112), (81, 110), (96, 118), (98, 125), (106, 130),
-                     (99, 143), (94, 145), (90, 157), (83, 167), (81, 155),
-                     (84, 143), (78, 135), (77, 123)], MINT)
-    printwork.shape([(86, 51), (104, 40), (115, 40), (112, 48), (101, 58), (94, 60)], MINT)
-    printwork.shape([(115, 96), (122, 87), (137, 86), (145, 91), (156, 91),
-                     (161, 104), (168, 107), (162, 114), (156, 121), (154, 132),
-                     (144, 147), (138, 148), (134, 136), (134, 125), (127, 115),
-                     (119, 116), (111, 107)], MINT)
-    printwork.shape([(122, 82), (124, 77), (130, 75), (132, 69), (139, 66),
-                     (137, 62), (143, 51), (149, 47), (151, 53), (145, 65), (150, 66),
-                     (157, 52), (167, 52), (183, 70), (189, 82), (193, 97), (184, 95),
-                     (183, 105), (178, 112), (174, 101), (170, 98), (167, 101),
-                     (160, 92), (153, 88), (150, 82), (141, 80), (143, 86),
-                     (138, 83), (134, 79), (129, 84)], MINT)
-    printwork.shape([(157, 133), (161, 127), (161, 135), (158, 140)], MINT)
-    for baseline, end in ((201, 210), (211, 159)):
-        printwork.line([(29, baseline), (end, baseline)], GREEN, 3)
+    def shape(points, tint=color):
+        page.shape([point(*position) for position in points], tint)
 
-    tear = [(129, 0), (124, 30), (131, 47), (113, 74), (122, 85), (107, 116),
-            (117, 130), (102, 156), (107, 171), (93, 197), (99, 211), (88, 239)]
-    for edge, offset, angle in ((0, (718, 189), 6), (244, (738, 201), -6)):
-        mask = Image.new('L', sheet.size)
-        Plate(mask).shape([(edge, 0), *tear, (edge, 239)], 255)
-        half = Image.new('RGBA', sheet.size)
-        half.paste(sheet, mask=mask)
-        half = half.rotate(angle, Image.Resampling.BICUBIC, expand=True)
-        page.image.paste(half, coords(offset), half)
+    def oval(box, solid=False):
+        page.oval((*point(*box[:2]), *point(*box[2:])), color if solid else None, color, size / 20)
 
-
-def shield(icon, color):
-    icon.shape([(34, 2), (57, 10), (54, 29), (48, 39), (34, 49), (20, 39),
-                (14, 29), (11, 10)], color)
-    icon.line([(34, 9), (49, 14), (47, 26), (43, 33), (34, 40), (25, 33),
-               (21, 26), (19, 14), (34, 9)], PAPER, 2)
-    icon.line([(34, 15), (34, 32)], PAPER, 2.5)
-    icon.line([(28, 18), (28, 24), (34, 27), (40, 24), (40, 18)], PAPER, 2.5)
-
-
-def chart(icon, color):
-    for left, height in ((7, 22), (19, 16), (31, 19), (43, 10)):
-        icon.rect((left, 45 - height, left + 7, 45), '#d9ccc2')
-    icon.line([(5, 9), (21, 19), (31, 12), (57, 32)], color, 5)
-    icon.shape([(46, 33), (61, 35), (60, 19)], color)
-    icon.line([(4, 46), (63, 46)], color, 2)
-
-
-def capitol(icon, color):
-    icon.line([(34, 2), (34, 10)], color, 3)
-    icon.shape([(34, 2), (44, 4), (34, 7)], color)
-    icon.rect((30, 10, 38, 14), color)
-    icon.oval((16, 13, 52, 48), color)
-    icon.rect((9, 29, 59, 33), color)
-    icon.rect((7, 34, 61, 48), PAPER)
-    for left in (14, 24, 34, 44, 51):
-        icon.rect((left, 35, left + 4, 44), color)
-    icon.rect((7, 45, 61, 49), color)
-    icon.line([(27, 27), (29, 20), (33, 16)], PAPER, 1.5)
-
-
-def probe(icon, color):
-    icon.oval((7, 8, 47, 48), color)
-    for box in ((15, 18, 24, 26), (28, 30, 37, 38), (29, 14, 33, 18)):
-        icon.oval(box, '#bdb4cb')
-    icon.line([(42, 33), (49, 27), (52, 22)], color, 2)
-    icon.line([(46, 18), (63, 6)], color, 2)
-    icon.shape([(48, 12), (54, 8), (59, 15), (53, 19)], color)
-    for left, top in ((41, 17), (58, 5)):
-        icon.shape([(left, top), (left + 6, top - 4), (left + 10, top + 1),
-                    (left + 4, top + 5)], color)
-
-
-def brief(page, left, top, section, color, pictogram, headline, summary):
-    page.text((left, top + 39), section, 'Sans-Bold', 26, color)
-    label_end = font('Sans-Bold', 26).getlength(section) / SCALE
-    page.line([(left + label_end + 15, top + 30), (left + 381, top + 30)], color, 1.4)
-    tile = Image.new('RGBA', coords((69, 52)))
-    pictogram(Plate(tile), color)
-    page.image.paste(tile, coords((left + 387, top + 4)), tile)
-    title_size = fitted('Sans-Bold', 40, 455, headline)
-    body_size = fitted('Sans', 30, 455, summary)
-    for index, words in enumerate(headline):
-        page.text((left, top + 94 + index * 43), words, 'Sans-Bold', title_size)
-    for index, words in enumerate(summary):
-        page.text((left, top + 182 + index * 33), words, 'Sans', body_size)
+    if name == 'WALL STREET':
+        for start, level in ((3, 21), (10, 17), (17, 19), (24, 11)):
+            shape([(start, 28), (start, level), (start + 4, level - 1), (start + 4, 28)])
+        stroke([(2, 16), (11, 9), (17, 12), (28, 3)], 2.2)
+        stroke([(22, 3), (29, 2), (28, 8)], 2)
+    elif name == 'CHIP CRACKDOWN':
+        shape([(6, 7), (25, 6), (26, 25), (7, 26)])
+        stroke([(10, 11), (21, 10), (22, 21), (11, 22), (10, 11)], 1.3, PAPER)
+        for offset in (9, 14, 19, 24):
+            stroke([(offset, 3), (offset, 7)])
+            stroke([(offset, 26), (offset, 30)])
+            stroke([(2, offset), (7, offset)])
+            stroke([(25, offset), (30, offset)])
+    elif name == 'UKRAINE':
+        shape([(16, 2), (28, 6), (27, 17), (23, 24), (16, 30), (8, 24), (4, 17), (3, 6)])
+        stroke([(7, 9), (16, 5), (24, 8), (23, 17), (20, 22), (16, 25), (11, 21), (8, 16)], 1.3, PAPER)
+        stroke([(12, 11), (12, 15), (16, 18), (20, 15), (20, 11)], 1.4, PAPER)
+        stroke([(16, 9), (16, 21)], 1.5, PAPER)
+    elif name == 'SANCTIONS':
+        shape([(2, 10), (16, 2), (30, 10), (29, 12), (3, 12)])
+        stroke([(7, 9), (16, 5), (24, 9)], 1, PAPER)
+        for offset in (6, 12, 18, 24):
+            stroke([(offset, 14), (offset, 24)], 2.8)
+        stroke([(3, 26), (29, 26)], 2)
+        stroke([(1, 29), (31, 29)], 1.5)
+    elif name == 'CLIMATE':
+        oval((10, 2, 21, 13), True)
+        for level in (15, 21, 27):
+            stroke([(2, level), (6, level + 1), (11, level - 1), (16, level - 2),
+                    (22, level + 1), (27, level + 1), (31, level - 1)], 1.8)
+    elif name == 'AIR DEFENSE':
+        shape([(2, 26), (12, 15), (7, 6), (10, 5), (18, 10), (26, 4), (31, 3),
+               (28, 9), (21, 16), (24, 25), (22, 27), (15, 20), (5, 28)])
+        stroke([(9, 22), (25, 9)], 1, PAPER)
+        stroke([(2, 17), (7, 12)], 1.2)
+        stroke([(11, 29), (15, 25)], 1.2)
+    elif name == 'ALLIES':
+        shape([(16, 1), (19, 7), (22, 5), (21, 15), (25, 10), (26, 13), (31, 12),
+               (29, 18), (31, 19), (23, 24), (24, 26), (17, 25), (17, 31), (15, 31),
+               (15, 25), (8, 26), (9, 23), (1, 19), (3, 17), (1, 12), (6, 13),
+               (7, 10), (12, 15), (10, 5), (13, 7)])
+        stroke([(16, 5), (16, 25)], .65, PAPER)
+        for across, down in ((5, 16), (10, 15), (12, 9), (27, 15), (22, 15), (20, 9)):
+            stroke([(across, down), (16, 23 if down >= 15 else 17)], .5, PAPER)
 
 
 def render(destination):
-    page = Plate(Image.new('RGB', coords((SIZE, SIZE)), PAPER))
-    page.rect((34, 15, 990, 21), INK)
-    page.text((512, 102), 'THE WORLD TODAY', 'Serif-Bold', 83, anchor='ms')
-    page.text((512, 150), 'Monday, 23 November 2026', 'Sans-Bold', 34, anchor='ms')
-    for start, end in ((34, 223), (801, 990)):
-        page.line([(start, 138), (end, 138)], INK, 2)
+    page = Plate()
+    page.rect((32, 9, 992, 14), INK)
+    page.text('Masthead', 'THE WORLD TODAY', (31, 19, 962, 63), MAST, 83, mode='single', center=True)
+    page.text('Date', 'Tuesday, 24 November 2026', (293, 87, 438, 26), LABEL, 26,
+              mode='single', center=True, middle=True)
+    for start, end in ((32, 285), (739, 992)):
+        page.line([(start, 99), (end, 99)], INK, 1.4)
+        page.line([(start, 103), (end, 103)], HAIRLINE, .7)
 
-    page.rect((0, 171, 1024, 514), GREEN)
-    page.rect((36, 194, 179, 233), MINT)
-    page.text((107, 223), 'CLIMATE', 'Sans-Bold', 26, GREEN, 'ms')
-    page.text((198, 223), 'Antalya, Türkiye', 'Sans-Bold', 27, PAPER)
-    page.text((32, 319), 'COP31 collapses', 'Serif-Bold', 70, PAPER)
-    page.text((32, 389), 'without a deal', 'Serif-Bold', 70, PAPER)
-    page.text((36, 446), 'EU and about 130 other parties rejected', 'Sans', 31, PAPER)
-    page.text((36, 484), 'text omitting a shift away from fossil fuels.', 'Sans', 31, PAPER)
-    treaty(page)
-    page.text((853, 484), 'Two days of overtime', 'Sans-Bold', 23, MINT, 'ms')
+    page.rect((0, 123, SIZE, 359), GREEN)
+    page.rect((32, 139, 235, 163), MINT)
+    page.text('Lead kicker', LEAD[0], (40, 141, 187, 20), LABEL, 17, mode='single',
+              center=True, middle=True, fill=GREEN)
+    page.line([(248, 151), (760, 151)], '#528272', .8)
+    page.text('Lead headline', LEAD[1], (32, 173, 738, 96), TITLE, 50, leading=.98, fill=PAPER)
+    page.text('Lead summary', LEAD[2], (34, 281, 733, 65), BODY, 19.5, leading=1.13, fill=PAPER)
+    chip(page)
 
-    page.line([(512, 534), (512, 982)], HAIRLINE, 1.6)
-    page.line([(34, 756), (990, 756)], INK, 2)
-    brief(page, 35, 525, 'UKRAINE', '#185789', shield,
-          ('Russian strikes kill', 'at least 15 near Kyiv'),
-          ('Sea drones hit a Russian', 'warship off Libya.'))
-    brief(page, 534, 525, 'MARKETS', '#9a3a29', chart,
-          ('AI bubble fears spark', 'global stock sell-off'),
-          ('Nikkei −5.06%, S&P 500 −3.7%;', 'gold gains ~2.7% as a haven.'))
-    brief(page, 35, 763, 'US POLITICS', '#8b4d15', capitol,
-          ('Democrats win', '258+ House seats'),
-          ('Their largest House majority', 'since 1992.'))
-    brief(page, 534, 763, 'SPACE', '#61417b', probe,
-          ('BepiColombo reaches', 'Mercury orbit'),
-          ('Japanese-European probes', 'arrive after eight years.'))
-    page.line([(34, 998), (990, 998)], INK, 1.5)
-    page.rect((34, 1005, 990, 1010), INK)
+    colors = ('#1e6353', '#8a4c28', '#235b7a', '#77432e', '#316851', '#375a78')
+    breaks = ('Snaps', 'Over', 'With', 'Sanctions', 'After', 'South')
+    page.line([(512, 374), (512, 860)], HAIRLINE, .8)
+    for index, ((name, title, body), color) in enumerate(zip(STORIES, colors)):
+        left, top = (32, 532)[index % 2], 361 + 170 * (index // 2)
+        vignette(page, name, left, top + 9, 26, color)
+        span = page.text(f'{name} kicker', name, (left + 35, top + 14, 225, 15), LABEL, 15,
+                         mode='single', middle=True, fill=color)
+        page.line([(left + 47 + span, top + 22), (left + 460, top + 22)], HAIRLINE, .7)
+        page.text(f'{name} headline', title, (left, top + 37, 460, 53), TITLE, 28,
+                  leading=1.02, break_before=breaks[index])
+        page.text(f'{name} summary', body, (left + 1, top + 96, 459, 67), BODY, 17.3, leading=1.13)
+        if index in (1, 3):
+            page.line([(32, top + 170), (992, top + 170)], INK, 1.2)
+
+    page.rect((0, 872, SIZE, 984), '#efecde')
+    page.line([(32, 872), (992, 872)], INK, 2)
+    page.line([(32, 876), (992, 876)], HAIRLINE, .8)
+    vignette(page, 'ALLIES', 44, 897, 62, '#93482f')
+    page.line([(121, 889), (121, 968)], HAIRLINE, .8)
+    page.text('ALLIES kicker', ALLIES[0], (139, 887, 100, 15), LABEL, 15, mode='single', fill='#93482f')
+    page.text('ALLIES headline', ALLIES[1], (138, 908, 854, 28), TITLE, 28, mode='single')
+    page.text('ALLIES summary', ALLIES[2], (139, 943, 853, 35), BODY, 17, leading=1.13, break_before='citing')
+
+    page.rect((0, 984, SIZE, SIZE), INK)
+    page.line([(32, 988), (992, 988)], '#4e6c5f', .8)
+    page.text('Ticker', TICKER, (30, 994, 964, 23), TAPE, 14, mode='single', center=True, middle=True, fill=PAPER)
     page.image.resize((SIZE, SIZE), Image.Resampling.LANCZOS).save(
         destination, format='PNG', optimize=False, compress_level=9)
+    print('Print proof in output pixels, rounded up. Lines: measured width / box width.')
+    print('\n'.join(page.proof))
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Draw the 23 November 2026 front page.')
+    parser = argparse.ArgumentParser(description='Draw the 24 November 2026 front page and print its fit proof.')
     parser.add_argument('output', nargs='?', type=Path, default=Path(__file__).with_name('entry.png'))
     render(parser.parse_args().output)
